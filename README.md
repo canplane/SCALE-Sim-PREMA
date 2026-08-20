@@ -1,136 +1,63 @@
-# **S**ystolic **C**NN **A**cce**LE**rator Simulator (SCALE Sim)
+# SCALE-Sim-PREMA
 
-SCALE sim is a CNN accelerator simulator, that provides cycle-accurate timing,
-power/energy, memory bandwidth and trace results for a
-specified accelerator configuration and neural network architecture.
+A fork of [SCALE-Sim v1](https://github.com/ARM-software/SCALE-Sim) (2019), a cycle-accurate systolic CNN accelerator simulator, implementing [PREMA](#references), a preemption-aware multi-task scheduler for NPUs. Built as part of an undergraduate research program.
 
-[Skip to Getting Started](getting_started.md)
+![A running task getting preempted mid-layer, styled bold red-inverse in the console output](.github/assets/preemption.png)
 
-## Motivation
+## What this adds
 
-SCALE sim enables research into CNN accelerator architecture and is also suitable for system-level studies. 
+On top of SCALE-Sim's single-task, cycle-accurate CNN accelerator simulator, this fork adds a multi-task scheduling layer:
 
-Since deep learning based solutions have become prevalent for computer vision
-over the recent few years, 
-there has been a surge in accelerator design proposals both from academia and the industry. 
+- A `Scheduler` that dispatches between concurrently-arriving tasks, with mid-layer preemption and checkpointed resume — state is saved and restored inside SCALE-Sim's own trace-generation loop.
+- All three algorithms from the PREMA paper: the inference-time prediction model, the token-based priority scheduler, and the dynamic CHECKPOINT/DRAIN preemption-mechanism selector.
+- Five baseline schedulers for comparison: FCFS, round robin (RRB), highest-priority-first (HPF), shortest-job-first (SJF), and token-only (TOKEN).
 
-It is natural to assume that we will see many more accelerators being proposed as new use cases are identified in the near future.
-However, it is important to keep in mind that CNN use cases will likely vary, which poses a large spectrum of efficiency and performance demands on the underlying CNN accelerator design. Therefore, it is important to quickly prototype architectural ideas and iterate over different designs.
+## Notes
 
-In the present, designing a new CNN accelerator usually starts from scratch. 
-Performing a simple first order analysis often involves a team of designers writing their own simulators, tackling bugs, and iterating over multiple times.
+- Preemption is checkpointed below the layer level: `Task.Layer` carries a small context table (`load_var`/`store_var`/`clear_var`) that the original trace-generation loop (`sram_traffic_ws.py`) now saves into and restores from mid-loop, so a task can be paused and resumed inside a single layer.
+- `prediction_layer_time.py` estimates each layer's runtime analytically instead of by running the real simulation, using the same cycle-counting logic as `sram_traffic_ws.py`. Comparing its estimates against SCALE-Sim's actual cycle counts surfaced a floor-omission bug in the original partial IFMAP trace path (`e2_BUG`), which the estimator deliberately reproduces for cycle parity.
 
-It is not hard to see that all this effort is mostly repeated work.
-This reinvention of the wheel could be avoided if there were a standard tool usable across various use cases and implementation goals.
-SCALE Sim is our effort to make a stride in this direction.
+  > **Retrospective note (2026):** The same bug had already been reported upstream in SCALE-Sim ([PR #47](https://github.com/ARM-software/SCALE-Sim/pull/47), opened January 2021 but never merged into the v1 master); I found that prior report only while revisiting this project years later.
+- The default time quota is 100,000 cycles. PREMA reports 0.25 ms at 700 MHz, or 175,000 cycles. The 2021 code comment instead computes 175,000,000, while the origin of the 100,000-cycle default is unclear.
+- Test scenarios (`task_list.csv`, `task_list_.csv`) mix real CNNs (AlexNet, GoogLeNet, MobileNet) with synthetic ones at different priorities and arrival times.
+- The default `PREMA` config exercises the full preempt → checkpoint → resume path at runtime: it produces a task whose executed timeline splits into two disjoint cycle ranges (e.g. `[[209394, 611238], [1051488, 1565604]]`), confirming preemption actually happens.
+- Uses its own ANSI color/style helpers to keep multi-task console output legible.
 
-## SCALE sim outputs
+## Limitations
 
-At the core of SCALE sim is a cycle-accurate architecture simulator for CNN accelerators. We build the accelerator based on the systolic array architecture, similar to the one used in Google's TPU.
-
-Given a convolution neural network topology and certain architecture parameters,
-SCALE sim is capable of estimating the following:
-
-* Run time in cycles
-* Average utilization
-* On-chip memory requirements
-* Off-chip interface bandwidth requirements
-
-With the help of external simulators such as CACTI or DRAMPower, users can also use SCALE sim to obtain:
-
-* Power consumption
-* Area estimates
-
-## Usecases
-
-Primarily, we envision two major usecases of SCALE sim, which we describe below. It is our hope that by releasing ths simulator, the community will find interesting and ingenious ways of using the tool for other research tasks that expand the original usage scope of SCALE sim.
-
-### Accelerator Design Space Exploration
-SCALE sim can help the designer quickly explore accelerator design space. In this mode, SCALE expects the designer to provide a list of limits for architecture features like SRAM size, array size, and interface bandwidth; relevant to the target use case.
-These limits help the tool in narrowing down the search space.
-SCALE will work if the limits are not specified by assuming the default values, but naturally, the run time will be large.
-
-Usually, designers can translate the use case constraints into high-level architecture constraints. 
-For instance, a power-optimized design will not have a large on-chip memory or a big computing array. 
-You get the gist. 
-
-### System Simulation
-Usually in an ML-enable application, CNN is just one stage of the end-to-end processing pipeline. Therefore, it is important to understand the application characteristics in the context of the entire Systems-on-a-chip (SoC). Existing full-system simulators such as Gem5 and GemDroid lack modles for CNN accelerators (IP), and therefore presents a roadblock in studying system-level behavior of ML-enabled applications.
-
-Due to the modular interface design, users could choose to integrate SCALE sim with Gem5 or GemDroid for full-system simulation. This is particular helpful for researchers who do not wish to perform in-depth investigation of the CNN accelerator microarchitecture, but wish to integrate a decent CNN IP to obtain meaningful system-level characterization results.
-
-## How does it work?
-
-SCALE sim simulates a TPU-like systolic array for CNN computation.
-Due to the highly regular data-flow involved in CNNs, it is easy to estimate the storage, traffic, and computation metrics without actually performing the computation. 
-SCALE uses this property to generate a cycle accurate traffic trace, into and out of the systolic array to the on-chip SRAM. 
-
-The on-chip SRAM is emulated as a double buffer storage unit, to amortize the high bandwidth requirement on the interface size. 
-Using the traffic traces from SRAM to the array and taking into account the double buffered SRAM, traces and metrics for the accelerator to main memory transactions are computed.
-Given a CNN topology, the current implementation of SCALE computes the output metrics sequentially for each layer.
-
+- No consolidated results exist across runs — each run still produces SCALE-Sim's own per-layer CSV logs, but there's no comparison table or plot showing PREMA against the baseline schedulers the way the paper's own evaluation does. The infrastructure to produce that comparison exists, but it hasn't been run to completion.
+- Token thresholds (`12`, `9`, `6`, `3`) are hardcoded rather than config-driven, which makes sweeping them for experiments awkward.
+- Comments are a mix of Korean and English.
+- Commit history is left as-is: most messages are just a timestamp (e.g. `211011-1512`), redundant with the commit's own authored date, and a cluster of them have the month mistyped (`211118-...`/`211119-...` on commits actually made in October).
 
 ## Getting Started
 
-### 30 seconds to SCALE sim!
+```bash
+git clone https://github.com/canplane/SCALE-Sim-PREMA.git
+cd SCALE-Sim-PREMA
+pip install -r requirements.txt
+```
 
-Getting started is simple! SCALE-Sim is completely written in python. At the moment, it has dependencies on the following python packages. Make sure you have them in your environment.
+Requires Python 3 and `tqdm`. Run a multi-task simulation with:
 
-* os
-* subprocess
-* math
-* configparser
-* tqdm
-* absl-py
+```
+python scale.py -a architectures/eyeriss.cfg -t task_list.csv -s PREMA -q 100000
+```
 
-*NOTE: SCALE-Sim needs python3 to run correctly. If you are using python2, you might run into typecasting errors* 
+- `-s`: `FCFS`, `RRB`, `HPF`, `TOKEN`, `SJF`, or `PREMA`
+- `-t`: a task list CSV — network name, network CSV path, priority, arrival time (in cycles), e.g.:
+  ```
+  Network, Network path, Priority, Arrival time,
+  "Net_0", "./networks/conv_nets/_foonet_2.csv", 3, 0,
+  ```
+- `-q`: time quota in cycles (see Notes above)
+- `-a`: architecture config — presets are in `architectures/`
 
-### Custom Experiment
-This experiment will run the default MLPERF_AlphaGoZero_32x32_os architechture contained inside scale.cfg. 
-It will also run alexnet as its network topology.
-* Run the command: ```python scale.py```
-* Wait for the run to finish
+See [README.upstream.md](README.upstream.md) for the base SCALE-Sim setup, motivation, and single-task usage.
 
-The config file inside configs contain achitecture presets.  
-the csv files inside toologies contain different networks
+## References
 
-In order to change a different arichtechture/network, create a new .cfg file inside ```cofigs``` and call a new network by running
-```python scale.py -arch_config=configs/eyeriss.cfg -network=topologies/yolo.csv```
-Here is sample of the config file.  
-![sample config](https://raw.githubusercontent.com/AnandS09/SCALE-Sim/master/images/config_example.png "sample config")    
-Architecture presets are the variable parameters for SCALE-Sim, like array size, memory etc.  
-
-The Network Topoplogy csv file contains the network that we want to test in our architechture.  
-SCALE-Sim accepts topology csv in the format shown below.  
-![yolo_tiny topology](https://raw.githubusercontent.com/AnandS09/SCALE-Sim/master/images/yolo_tiny_csv.png "yolo_tiny.csv")
-
-Since SCALE-Sim is a CNN simulator please do not provide any layers other than convolutional or fully connected in the csv.
-You can take a look at 
-[yolo_tiny.csv](https://raw.githubusercontent.com/AnandS09/SCALE-Sim/master/topologies/yolo_tiny.csv)
-for your reference.
-
-### Output
-
-Here is an example output dumped to stdout when running Yolo tiny (whose configuration is in yolo_tiny.csv):
-![screen_out](https://github.com/AnandS09/SCALE-Sim/blob/master/images/output.png "std_out")
-
-Also, the simulator generates read write traces and summary logs at ```./outputs/<topology_name>```.
-There are three summary logs:
-
-* Layer wise runtime and average utilization
-* Layer wise MAX DRAM bandwidth log
-* Layer wise AVG DRAM bandwidth log
-* Layer wise breakdown of data movement and compute cycles
-
-In addition cycle accurate SRAM/DRAM access logs are also dumped and could be accesses at ```./outputs/<topology_name>/layer_wise```
-
-### Detailed Documentation
-
-For detailed insights on working of SCALE-Sim, you can refer to this [paper](https://arxiv.org/abs/1811.02883)
-
-## Citing
-
-If you find this tool useful for your research, please use the following bibtex to cite us,
+This project builds on the following works:
 
 ```
 @article{samajdar2018scale,
@@ -139,21 +66,26 @@ If you find this tool useful for your research, please use the following bibtex 
   journal={arXiv preprint arXiv:1811.02883},
   year={2018}
 }
+
+@inproceedings{choi2020prema,
+  title={PREMA: A Predictive Multi-task Scheduling Algorithm For Preemptible Neural Processing Units},
+  author={Choi, Yujeong and Rhu, Minsoo},
+  booktitle={2020 IEEE International Symposium on High Performance Computer Architecture (HPCA)},
+  pages={220--233},
+  year={2020},
+  organization={IEEE},
+  doi={10.1109/HPCA47549.2020.00027}
+}
 ```
 
-## Contributing
+## About
 
-Please send a [pull request](https://help.github.com/articles/creating-a-pull-request/).
+- **Based on:** [SCALE-Sim v1](https://github.com/ARM-software/SCALE-Sim) (2019), Arm Research / Georgia Institute of Technology / University of Rochester — archived in 2023, superseded by SCALE-Sim v2; see [README.upstream.md](README.upstream.md) for the original project
+- **Implements:** [PREMA](https://doi.org/10.1109/HPCA47549.2020.00027) (HPCA 2020), Yujeong Choi and Minsoo Rhu, KAIST
+- **Context:** undergraduate research program
+- **Timeline:** 2021-10-11 – 2021-11-13
+- **Language:** Python
+- **License:** MIT (inherited from SCALE-Sim)
 
-## Authors
-
-[Ananda Samajdar](https://anands09.github.io), Georgia Institute of Technology
-
-[Yuhao Zhu](http://yuhaozhu.com), University of Rochester
-
-[Paul Whatmough](https://www.linkedin.com/in/paul-whatmough-2062729/), Arm Research, Boston, MA
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
+---
+[github.com/canplane/SCALE-Sim-PREMA](https://github.com/canplane/SCALE-Sim-PREMA)
